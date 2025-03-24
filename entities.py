@@ -24,32 +24,71 @@ class MovingObject(Entity):
     def __init__(self, speed, resource_manager):
         super().__init__(resource_manager)
         self.speed = speed
-        self.position = 0
+        self.position = 0  # Start at left side
         self.has_passed = False
         self.size = int(self.config.window_height * 0.02)
         self.color = self.resources.get_color('RED')
+        self.max_health = 10
+        self.health = self.max_health
+        
+        # Create surface for mask collision
+        self.surface = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
+        pygame.draw.circle(self.surface, self.color, (self.size, self.size), self.size)
+        self.mask = pygame.mask.from_surface(self.surface)
+        
+        # Create rect for position
+        self.rect = self.surface.get_rect()
+        self.rect.centerx = int(self.position)
+        self.rect.centery = self.config.window_height // 2
+
+    def take_damage(self, damage):
+        self.health -= damage
+        return self.health <= 0  # Return True if enemy dies
 
     def update(self):
+        # Move right
         self.position += self.speed
         
-        # Check if object has passed
-        if not self.has_passed and self.position >= self.config.window_width:
+        # Update rect position
+        self.rect.centerx = int(self.position)
+        self.rect.centery = self.config.window_height // 2
+        
+        # Check if passed screen edge
+        if self.position > self.config.window_width:
             self.has_passed = True
             return True
-        
         return False
 
     def draw(self, surface):
-        road_y, road_height = self.resources.get_road_dimensions(
-            self.config.window_width,
-            self.config.window_height
-        )
+        # Draw enemy
+        surface.blit(self.surface, self.rect)
         
-        # Draw object
-        x = int(self.position)
-        y = road_y + (road_height - self.size) // 2
-        rect = pygame.Rect(x, y, self.size, self.size)
-        pygame.draw.rect(surface, self.color, rect)
+        # Draw health bar if damaged
+        if self.health < self.max_health:
+            bar_width = self.size * 2
+            bar_height = 4
+            health_percent = self.health / self.max_health
+            
+            # Background (red)
+            bar_rect = pygame.Rect(
+                self.rect.centerx - bar_width//2,
+                self.rect.top - bar_height - 2,
+                bar_width,
+                bar_height
+            )
+            pygame.draw.rect(surface, self.resources.get_color('RED'), bar_rect)
+            
+            # Health (green)
+            health_rect = pygame.Rect(
+                self.rect.centerx - bar_width//2,
+                self.rect.top - bar_height - 2,
+                bar_width * health_percent,
+                bar_height
+            )
+            pygame.draw.rect(surface, self.resources.get_color('GREEN'), health_rect)
+            
+        # Debug: Draw collision rect
+        # pygame.draw.rect(surface, (255, 0, 0), self.rect, 1)
 
 class Projectile(Entity):
     def __init__(self, x, y, target_x, target_y, resource_manager, speed=10):
@@ -61,6 +100,16 @@ class Projectile(Entity):
         self.speed = speed
         self.size = 5
         self.color = self.resources.get_color('YELLOW_GREEN')
+        
+        # Create surface for mask collision
+        self.surface = pygame.Surface((self.size * 2, self.size * 2), pygame.SRCALPHA)
+        pygame.draw.circle(self.surface, self.color, (self.size, self.size), self.size)
+        self.mask = pygame.mask.from_surface(self.surface)
+        
+        # Create rect for position
+        self.rect = self.surface.get_rect()
+        self.rect.center = (int(self.x), int(self.y))
+        
         self.update_trajectory()
 
     def update_trajectory(self):
@@ -82,6 +131,9 @@ class Projectile(Entity):
         self.x += self.dx
         self.y += self.dy
         
+        # Update rect position
+        self.rect.center = (int(self.x), int(self.y))
+        
         # Check if projectile has reached or passed target
         if (self.dx > 0 and self.x >= self.target_x) or \
            (self.dx < 0 and self.x <= self.target_x):
@@ -94,20 +146,18 @@ class Projectile(Entity):
             
         return False
 
-    def draw(self, surface):
-        pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), self.size)
-
     def check_hit(self, target):
-        # Calculate distance between projectile center and target center
-        distance = math.sqrt(
-            (self.x - target.position) ** 2 +
-            (self.y - (self.config.window_height // 2)) ** 2
-        )
+        # Get offset between the two masks
+        offset = (target.rect.x - self.rect.x, target.rect.y - self.rect.y)
         
-        # Consider both projectile and target size for hit detection
-        # Projectile is considered to hit if at least half of it touches the target
-        hit_threshold = (self.size + target.size) / 2
-        return distance < hit_threshold
+        # Check if masks overlap at the current offset
+        return self.mask.overlap(target.mask, offset) is not None
+
+    def draw(self, surface):
+        # Draw projectile
+        surface.blit(self.surface, self.rect)
+        # Debug: Draw collision rect
+        # pygame.draw.rect(surface, (255, 255, 0), self.rect, 1)
 
 class Tower(Entity):
     def __init__(self, x, y, resource_manager):
@@ -123,6 +173,7 @@ class Tower(Entity):
         self.last_shot_time = 0
         self.shoot_cooldown = 1000  # 1 second
         self.range = 300  # Shooting range
+        self.damage = 10  # Base tower damage
 
     def update(self, moving_objects):
         current_time = pygame.time.get_ticks()
@@ -137,7 +188,8 @@ class Tower(Entity):
             dy = self.config.window_height // 2 - self.rect.centery
             distance = math.sqrt(dx * dx + dy * dy)
             
-            if distance <= self.range and distance < min_distance:
+            # Only target enemies that haven't passed us yet
+            if distance <= self.range and distance < min_distance and obj.position < self.rect.centerx:
                 min_distance = distance
                 nearest_target = obj
         
@@ -151,22 +203,24 @@ class Tower(Entity):
             if projectile.update():
                 self.projectiles.remove(projectile)
             elif nearest_target and projectile.check_hit(nearest_target):
-                moving_objects.remove(nearest_target)
+                # Apply damage and check if enemy dies
+                if nearest_target.take_damage(self.damage):
+                    moving_objects.remove(nearest_target)
                 self.projectiles.remove(projectile)
 
     def shoot(self, target):
-        # Calculate exact target position
-        target_x = target.position
-        target_y = self.config.window_height // 2  # Road center
+        # Calculate intercept point based on target speed
+        time_to_target = abs(target.position - self.rect.centerx) / 10  # projectile speed
+        future_position = target.position + (target.speed * time_to_target)
         
-        # Create projectile with exact target position
+        # Create projectile aimed at predicted position
         projectile = Projectile(
             self.rect.centerx,
             self.rect.centery,
-            target_x,
-            target_y,
+            future_position,
+            self.config.window_height // 2,
             self.resources,
-            speed=10  # Increased speed for better accuracy
+            speed=10
         )
         self.projectiles.append(projectile)
 
