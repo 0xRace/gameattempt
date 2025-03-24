@@ -21,6 +21,8 @@ GREEN = (0, 255, 0)
 LIGHT_GRAY = (200, 200, 200)
 YELLOW = (255, 255, 0)
 PURPLE = (128, 0, 128)  # New color for moving objects
+ORANGE = (255, 165, 0)  # Color for towers
+GOLD = (255, 215, 0)  # Color for money display
 
 # Global variables for screen dimensions
 WINDOW_WIDTH = DEFAULT_WIDTH
@@ -314,6 +316,95 @@ def create_moving_objects():
     
     return objects
 
+class Tower:
+    def __init__(self, x, y, size):
+        self.rect = pygame.Rect(x, y, size, size)
+        self.color = ORANGE
+        self.is_placed = False
+        self.is_selected = False
+        self.is_dragging = False
+        self.drag_offset = (0, 0)  # Offset from mouse position when dragging
+
+    def draw(self, surface):
+        color = (min(self.color[0] + 50, 255), min(self.color[1] + 50, 255), min(self.color[2] + 50, 255)) if self.is_selected else self.color
+        pygame.draw.rect(surface, color, self.rect)
+        pygame.draw.rect(surface, BLACK, self.rect, 2)
+
+    def handle_event(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.rect.collidepoint(event.pos):
+                self.is_selected = not self.is_selected
+                return True
+        return False
+
+    def update_position(self, x, y):
+        self.rect.x = x
+        self.rect.y = y
+
+    def start_drag(self, mouse_pos):
+        self.is_dragging = True
+        self.drag_offset = (self.rect.x - mouse_pos[0], self.rect.y - mouse_pos[1])
+
+    def stop_drag(self):
+        self.is_dragging = False
+
+    def update_drag(self, mouse_pos):
+        if self.is_dragging:
+            self.rect.x = mouse_pos[0] + self.drag_offset[0]
+            self.rect.y = mouse_pos[1] + self.drag_offset[1]
+
+def draw_balance(surface, balance):
+    font = get_scaled_font(36)
+    text = f"Balance: ${balance}"
+    text_surface = font.render(text, True, GOLD)
+    text_rect = text_surface.get_rect(topright=(WINDOW_WIDTH - 20, 20))
+    surface.blit(text_surface, text_rect)
+
+def draw_shop(surface):
+    # Shop bar dimensions
+    shop_height = int(WINDOW_HEIGHT * 0.15)  # 15% of screen height
+    shop_y = WINDOW_HEIGHT - shop_height
+    
+    # Draw shop background
+    shop_rect = pygame.Rect(0, shop_y, WINDOW_WIDTH, shop_height)
+    pygame.draw.rect(surface, LIGHT_GRAY, shop_rect)
+    pygame.draw.rect(surface, BLACK, shop_rect, 2)
+    
+    # Draw tower preview
+    tower_size = int(shop_height * 0.6)
+    tower_x = shop_rect.x + 20
+    tower_y = shop_rect.y + (shop_height - tower_size) // 2
+    tower_rect = pygame.Rect(tower_x, tower_y, tower_size, tower_size)
+    pygame.draw.rect(surface, ORANGE, tower_rect)
+    pygame.draw.rect(surface, BLACK, tower_rect, 2)
+    
+    # Draw tower cost inside the square
+    font = get_scaled_font(24)
+    cost_text = "$25"
+    cost_surface = font.render(cost_text, True, GOLD)
+    cost_rect = cost_surface.get_rect(center=tower_rect.center)  # Center the text in the square
+    surface.blit(cost_surface, cost_rect)
+    
+    return tower_rect
+
+def is_valid_tower_placement(x, y, road_rect):
+    # Tower size
+    tower_size = int(WINDOW_HEIGHT * 0.05)  # 5% of screen height
+    
+    # Create tower rect
+    tower_rect = pygame.Rect(x, y, tower_size, tower_size)
+    
+    # Check if tower is on the road
+    if tower_rect.colliderect(road_rect):
+        return False
+    
+    # Check if tower is within screen bounds
+    if (tower_rect.left < 0 or tower_rect.right > WINDOW_WIDTH or 
+        tower_rect.top < 0 or tower_rect.bottom > WINDOW_HEIGHT):
+        return False
+    
+    return True
+
 def main():
     global WINDOW_WIDTH, WINDOW_HEIGHT
     
@@ -347,6 +438,16 @@ def main():
     
     # Create moving objects
     moving_objects = create_moving_objects()
+    
+    # Create tower
+    tower_size = int(WINDOW_HEIGHT * 0.05)
+    tower = Tower(0, 0, tower_size)
+    selected_tower = None
+    placed_towers = []  # List to store placed towers
+    
+    # Game variables
+    player_balance = 50  # Starting balance
+    TOWER_COST = 25  # Cost of each tower
     
     # Variables for resolution change
     old_width = WINDOW_WIDTH
@@ -426,6 +527,54 @@ def main():
             elif current_state == GAME_SCREEN:
                 if game_back_button.handle_event(event):
                     current_state = MENU_SCREEN
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    # Get road dimensions
+                    road_height = int(WINDOW_HEIGHT * 0.15)
+                    road_y = WINDOW_HEIGHT // 2 - road_height // 2
+                    road_rect = pygame.Rect(0, road_y, WINDOW_WIDTH, road_height)
+                    
+                    # Get shop tower rect
+                    shop_height = int(WINDOW_HEIGHT * 0.15)
+                    shop_y = WINDOW_HEIGHT - shop_height
+                    tower_size = int(shop_height * 0.6)
+                    tower_x = 20
+                    tower_y = shop_y + (shop_height - tower_size) // 2
+                    shop_tower_rect = pygame.Rect(tower_x, tower_y, tower_size, tower_size)
+                    
+                    # Check if clicking shop tower
+                    if shop_tower_rect.collidepoint(event.pos) and player_balance >= TOWER_COST:
+                        selected_tower = Tower(event.pos[0] - tower_size//2, event.pos[1] - tower_size//2, tower_size)
+                        selected_tower.is_selected = True
+                        selected_tower.start_drag(event.pos)
+                    # Check if clicking on a placed tower
+                    else:
+                        for tower in placed_towers:
+                            if tower.rect.collidepoint(event.pos):
+                                tower.start_drag(event.pos)
+                                selected_tower = tower
+                                break
+                elif event.type == pygame.MOUSEBUTTONUP and selected_tower:
+                    # Get road dimensions
+                    road_height = int(WINDOW_HEIGHT * 0.15)
+                    road_y = WINDOW_HEIGHT // 2 - road_height // 2
+                    road_rect = pygame.Rect(0, road_y, WINDOW_WIDTH, road_height)
+                    
+                    # Check if placement is valid
+                    if is_valid_tower_placement(selected_tower.rect.x, selected_tower.rect.y, road_rect):
+                        selected_tower.is_placed = True
+                        selected_tower.is_selected = False
+                        if selected_tower not in placed_towers:
+                            placed_towers.append(selected_tower)
+                            player_balance -= TOWER_COST  # Deduct tower cost
+                    else:
+                        # If placement is invalid, remove the tower
+                        if selected_tower in placed_towers:
+                            placed_towers.remove(selected_tower)
+                        selected_tower = None
+                    if selected_tower:  # Only call stop_drag if selected_tower still exists
+                        selected_tower.stop_drag()
+                elif event.type == pygame.MOUSEMOTION and selected_tower:
+                    selected_tower.update_drag(event.pos)
 
         # Draw
         screen.fill(WHITE)
@@ -448,6 +597,16 @@ def main():
             for obj in moving_objects:
                 obj.update()
                 obj.draw(screen)
+            # Draw placed towers
+            for tower in placed_towers:
+                tower.draw(screen)
+            # Draw shop
+            draw_shop(screen)
+            # Draw selected tower if exists
+            if selected_tower:
+                selected_tower.draw(screen)
+            # Draw balance
+            draw_balance(screen, player_balance)
             game_back_button.draw(screen)
         
         pygame.display.flip()
